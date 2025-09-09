@@ -1,7 +1,7 @@
 name: autopost
 on:
   schedule:
-    - cron: "17 13,18,23 * * *"   # 3x daily UTC
+    - cron: "17 * * * *"   # hourly at :17 UTC
   workflow_dispatch: {}
 jobs:
   run:
