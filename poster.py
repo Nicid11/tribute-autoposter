@@ -1,32 +1,28 @@
-# poster.py — single-file suite: posts, logs, screenshots, HTML report with links
+# poster.py — speed mode: posts to all sites each run + HTML report
 import os, sys, time, random, re, csv, pathlib, html
-from datetime import datetime, timedelta
+from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ---- paths ----
 ROOT = pathlib.Path(__file__).parent
 DATA = ROOT / "data"; DATA.mkdir(exist_ok=True)
 SHOTS = DATA / "shots"; SHOTS.mkdir(exist_ok=True)
-LOG = DATA / "posts.csv"
-REPORT = DATA / "report.html"
-URLS = DATA / "urls.txt"
+LOG = DATA / "posts.csv"; REPORT = DATA / "report.html"; URLS = DATA / "urls.txt"
 
-# ---- secrets ----
-TARGET_URL = os.getenv("TARGET_URL", "").strip()
-CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "").strip()
-CONTACT_PHONE = os.getenv("CONTACT_PHONE", "").strip()
-BRAND_NAME = os.getenv("BRAND_NAME", "Simply Averie").strip()
+TARGET_URL = os.getenv("TARGET_URL","").strip()
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL","").strip()
+CONTACT_PHONE = os.getenv("CONTACT_PHONE","").strip()
+BRAND_NAME = os.getenv("BRAND_NAME","Simply Averie").strip()
 if not TARGET_URL:
-    print("Missing TARGET_URL secret.", file=sys.stderr); sys.exit(2)
+    print("Missing TARGET_URL.", file=sys.stderr); sys.exit(2)
 
-# ---- config ----
-MAX_PER_RUN = 10  # post to up to 10 sites per run
 BUTTON_TEXTS = ["Post","Submit","Publish","Continue","Create","Place Ad","Post Ad","Proceed","Next","Save","Send"]
 TITLE_HINTS = ["title","subject","headline","adtitle","posttitle"]
 BODY_HINTS  = ["body","content","message","description","text","post","story","details"]
 EMAIL_HINTS = ["email","e-mail","contact"]
 NAME_HINTS  = ["name","contactname","fullname"]
 PHONE_HINTS = ["phone","telephone","mobile","contactnumber","contact"]
+
+def sanitize(s): return "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in s)[:80]
 
 ADS = [
     {"title":"Skip $2,000 newspaper fees—modern obituary service","body":"Honor your loved one with a dignified online tribute and real visibility. Start today: {{TARGET_URL}}"},
@@ -52,39 +48,21 @@ ADS = [
 ]
 
 SITES = [
-    {"id":"posteezy","new_ad_url":"https://posteezy.com/","category_hints":["Announcements","Community","Obituary","Services"],"cooldown_days":7},
-    {"id":"usnetads","new_ad_url":"https://www.usnetads.com/post/post-free-ads.php","category_hints":["Announcements","Community","Services"],"cooldown_days":7},
-    {"id":"adpost4u","new_ad_url":"https://www.adpost4u.com/","category_hints":["Services","Community","Announcements"],"cooldown_days":7},
-    {"id":"globalfreeads","new_ad_url":"https://www.global-free-classified-ads.com/","category_hints":["Announcements","Services","Community"],"cooldown_days":7},
-    {"id":"adpost","new_ad_url":"https://www.adpost.com/post-ad/","category_hints":["Community","Services","Announcements"],"cooldown_days":7},
-    {"id":"postcorn","new_ad_url":"https://www.postcorn.com/","category_hints":["Announcements","Community","Services"],"cooldown_days":7},
-    {"id":"adlandpro","new_ad_url":"https://www.adlandpro.com/","category_hints":["Community","Announcements","Services"],"cooldown_days":7},
-    {"id":"freeglobalclassifiedads","new_ad_url":"https://www.freeglobalclassifiedads.com/classifieds/postad.php","category_hints":["Announcements","Community","Services"],"cooldown_days":7},
-    {"id":"adzone","new_ad_url":"https://www.adzoneclassifieds.com/post-free-ads","category_hints":["Announcements","Community","Services"],"cooldown_days":7},
-    {"id":"postadverts","new_ad_url":"https://www.postadverts.com/","category_hints":["Announcements","Community","Services"],"cooldown_days":7},
-    {"id":"adcrazy","new_ad_url":"https://www.adcrazy.co.uk/","category_hints":["Announcements","Community","Services"],"cooldown_days":7},
-    {"id":"worldfreeads","new_ad_url":"https://www.worldfreeads.com/","category_hints":["Announcements","Community","Services"],"cooldown_days":7},
+    {"id":"posteezy","new_ad_url":"https://posteezy.com/","category_hints":["Announcements","Community","Obituary","Services"]},
+    {"id":"usnetads","new_ad_url":"https://www.usnetads.com/post/post-free-ads.php","category_hints":["Announcements","Community","Services"]},
+    {"id":"adpost4u","new_ad_url":"https://www.adpost4u.com/","category_hints":["Services","Community","Announcements"]},
+    {"id":"globalfreeads","new_ad_url":"https://www.global-free-classified-ads.com/","category_hints":["Announcements","Services","Community"]},
+    {"id":"adpost","new_ad_url":"https://www.adpost.com/post-ad/","category_hints":["Community","Services","Announcements"]},
+    {"id":"postcorn","new_ad_url":"https://www.postcorn.com/","category_hints":["Announcements","Community","Services"]},
+    {"id":"adlandpro","new_ad_url":"https://www.adlandpro.com/","category_hints":["Community","Announcements","Services"]},
+    {"id":"freeglobalclassifiedads","new_ad_url":"https://www.freeglobalclassifiedads.com/classifieds/postad.php","category_hints":["Announcements","Community","Services"]},
+    {"id":"adzone","new_ad_url":"https://www.adzoneclassifieds.com/post-free-ads","category_hints":["Announcements","Community","Services"]},
+    {"id":"postadverts","new_ad_url":"https://www.postadverts.com/","category_hints":["Announcements","Community","Services"]},
+    {"id":"adcrazy","new_ad_url":"https://www.adcrazy.co.uk/","category_hints":["Announcements","Community","Services"]},
+    {"id":"worldfreeads","new_ad_url":"https://www.worldfreeads.com/","category_hints":["Announcements","Community","Services"]},
 ]
 
-# ---- utils ----
-def sanitize(s: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in s)[:80]
-
-def read_last_by_site():
-    m = {}
-    if LOG.exists():
-        with LOG.open("r", newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                try:
-                    ts = datetime.fromisoformat(row["ts"])
-                    site = row.get("site","")
-                    if site and (site not in m or ts > m[site]):
-                        m[site] = ts
-                except Exception:
-                    continue
-    return m
-
-def append_log_row(row):
+def append_log(row):
     write_header = not LOG.exists()
     with LOG.open("a", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["ts","site","url","title","result","detail","shot"])
@@ -122,33 +100,30 @@ def try_select_category(page, hints):
                 if any(h.lower() in t.lower() for h in hints):
                     val = opt.get_attribute("value") or opt.inner_text()
                     sel.select_option(value=val); return True
-    except Exception:
-        pass
+    except Exception: pass
     return False
 
 def click_submit(page):
     for t in BUTTON_TEXTS:
         btn = page.query_selector(f'button:has-text("{t}")') or page.query_selector(f'input[type="submit"][value*="{t}" i]')
         if btn:
-            btn.click(); page.wait_for_timeout(1200)
+            btn.click(); page.wait_for_timeout(1000)
             try: btn.click()
             except Exception: pass
             return True
     btn = page.query_selector("button") or page.query_selector('input[type="submit"]')
-    if btn: btn.click(); page.wait_for_timeout(1200); return True
-    page.keyboard.press("Enter"); page.wait_for_timeout(1200); return True
+    if btn: btn.click(); page.wait_for_timeout(1000); return True
+    page.keyboard.press("Enter"); page.wait_for_timeout(1000); return True
 
 def looks_success(page):
     html_l = page.content().lower()
-    patterns = ["thank you","your ad","posted","success","submitted","awaiting approval","processing"]
-    if any(p in html_l for p in patterns): return True
+    if any(p in html_l for p in ["thank you","your ad","posted","success","submitted","awaiting approval"]): return True
     if re.search(r"/(view|ads?|post|detail|success|thanks|submitted)/", page.url, re.I): return True
     return False
 
 def take_shot(page, site_id, status):
     ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    fn = f"{ts}-{sanitize(site_id)}-{status}.png"
-    path = SHOTS / fn
+    fn = f"{ts}-{sanitize(site_id)}-{status}.png"; path = SHOTS / fn
     try: page.screenshot(path=str(path), full_page=True)
     except Exception: pass
     return f"shots/{fn}"
@@ -156,20 +131,16 @@ def take_shot(page, site_id, status):
 def post_one(pw, site, ad):
     site_id = site["id"]; url = site["new_ad_url"]
     result = {"site":site_id,"url":"","title":ad["title"],"result":"fail","detail":"","shot":""}
-
     browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
     ctx = browser.new_context()
     page = ctx.new_page()
     try:
-        page.goto(url, timeout=60000)
-        page.wait_for_load_state("domcontentloaded", timeout=30000)
-        page.wait_for_timeout(random.uniform(1200,2000))
-
+        page.goto(url, timeout=60000); page.wait_for_load_state("domcontentloaded", timeout=30000)
+        page.wait_for_timeout(random.uniform(1000,1600))
         try:
             link = page.get_by_text(re.compile(r"(post|publish).{0,6}(ad|now)?", re.I))
-            if link: link.first.click(timeout=2500); page.wait_for_timeout(1000)
-        except Exception:
-            pass
+            if link: link.first.click(timeout=2500); page.wait_for_timeout(800)
+        except Exception: pass
 
         utm = "?utm_source=classifieds&utm_medium=autoposter&utm_campaign=tribute"
         title = ad["title"].replace("{{TARGET_URL}}", TARGET_URL)
@@ -180,9 +151,9 @@ def post_one(pw, site, ad):
         click_submit(page)
 
         for _ in range(3):
-            try: page.wait_for_load_state("networkidle", timeout=10000)
+            try: page.wait_for_load_state("networkidle", timeout=8000)
             except Exception: pass
-            page.wait_for_timeout(1200)
+            page.wait_for_timeout(900)
             if looks_success(page): break
 
         if looks_success(page):
@@ -196,27 +167,16 @@ def post_one(pw, site, ad):
     return result
 
 def build_report(rows):
-    # write urls.txt
+    # urls.txt
     with URLS.open("w", encoding="utf-8") as f:
         for r in rows:
-            if r["result"]=="ok" and r["url"]:
-                f.write(r["url"]+"\n")
-
-    # write HTML
-    head = """<!doctype html><meta charset="utf-8">
-<title>Autoposter Report</title>
-<style>
-body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:20px}
-h1{margin:0 0 6px 0}
-small{color:#666}
-table{border-collapse:collapse;width:100%;margin-top:12px}
-td,th{border:1px solid #ddd;padding:8px;font-size:14px;vertical-align:top}
-th{background:#f3f3f3;text-align:left}
-.ok{color:#0a7a2a;font-weight:600}
-.fail{color:#a00;font-weight:600}
-code{background:#f5f5f5;padding:2px 4px;border-radius:4px}
-img{max-width:420px;border:1px solid #ddd}
-</style>"""
+            if r["result"]=="ok" and r["url"]: f.write(r["url"]+"\n")
+    # HTML
+    head = """<!doctype html><meta charset="utf-8"><title>Autoposter Report</title>
+<style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:20px}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:8px;font-size:14px}
+th{background:#f3f3f3} .ok{color:#0a7a2a;font-weight:600} .fail{color:#a00;font-weight:600}
+img{max-width:420px;border:1px solid #ddd}</style>"""
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     body = [f"<h1>Autoposter Report</h1><small>Generated {ts}</small>",
             "<table><tr><th>Site</th><th>Result</th><th>Title</th><th>URL</th><th>Screenshot</th><th>Detail</th></tr>"]
@@ -227,31 +187,21 @@ img{max-width:420px;border:1px solid #ddd}
         body.append(f"<tr><td>{html.escape(r['site'])}</td><td class='{cls}'>{html.escape(r['result'])}</td>"
                     f"<td>{html.escape(r['title'])}</td><td>{url_html}</td><td>{shot_html}</td><td><code>{html.escape(r['detail'])}</code></td></tr>")
     body.append("</table>")
-    REPORT.write_text(head + "\n" + "\n".join(body), encoding="utf-8")
+    REPORT.write_text(head+"\n"+"\n".join(body), encoding="utf-8")
 
 def main():
-    # cooldown by CSV history
-    last = read_last_by_site()
-    now = datetime.utcnow()
-    eligible = [s for s in SITES if s["id"] not in last or (now - last[s["id"]]) >= timedelta(days=int(s.get("cooldown_days",7)))]
-    random.shuffle(eligible)
-    todo = eligible[:MAX_PER_RUN]
-    if not todo:
-        print("No sites eligible today."); return
-
-    results = []
+    rows = []
     with sync_playwright() as pw:
-        for s in todo:
+        for s in SITES:  # ALL sites each run
             ad = random.choice(ADS)
             print(f"[{datetime.utcnow().isoformat()}] Posting to {s['id']} ...")
             r = post_one(pw, s, ad)
             print(r)
-            row = {"ts": datetime.utcnow().isoformat(), **r}
-            append_log_row(row)
-            results.append(r)
-            time.sleep(random.uniform(7,15))
-
-    build_report(results)
+            logrow = {"ts": datetime.utcnow().isoformat(), **r}
+            rows.append(r)
+            append_log(logrow)
+            time.sleep(random.uniform(6,12))
+    build_report(rows)
 
 if __name__ == "__main__":
     main()
