@@ -1,4 +1,3 @@
-
 # poster.py — fresh final
 import os, sys, time, random, re, pathlib
 from datetime import datetime, timedelta
