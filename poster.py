@@ -1,13 +1,17 @@
-# poster.py — self-contained, no extra libs
-import os, sys, time, random, re, csv, pathlib
+# poster.py — single-file suite: posts, logs, screenshots, HTML report with links
+import os, sys, time, random, re, csv, pathlib, html
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+# ---- paths ----
 ROOT = pathlib.Path(__file__).parent
 DATA = ROOT / "data"; DATA.mkdir(exist_ok=True)
 SHOTS = DATA / "shots"; SHOTS.mkdir(exist_ok=True)
 LOG = DATA / "posts.csv"
+REPORT = DATA / "report.html"
+URLS = DATA / "urls.txt"
 
+# ---- secrets ----
 TARGET_URL = os.getenv("TARGET_URL", "").strip()
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "").strip()
 CONTACT_PHONE = os.getenv("CONTACT_PHONE", "").strip()
@@ -15,8 +19,14 @@ BRAND_NAME = os.getenv("BRAND_NAME", "Simply Averie").strip()
 if not TARGET_URL:
     print("Missing TARGET_URL secret.", file=sys.stderr); sys.exit(2)
 
-def sanitize(s: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in s)[:80]
+# ---- config ----
+MAX_PER_RUN = 10  # post to up to 10 sites per run
+BUTTON_TEXTS = ["Post","Submit","Publish","Continue","Create","Place Ad","Post Ad","Proceed","Next","Save","Send"]
+TITLE_HINTS = ["title","subject","headline","adtitle","posttitle"]
+BODY_HINTS  = ["body","content","message","description","text","post","story","details"]
+EMAIL_HINTS = ["email","e-mail","contact"]
+NAME_HINTS  = ["name","contactname","fullname"]
+PHONE_HINTS = ["phone","telephone","mobile","contactnumber","contact"]
 
 ADS = [
     {"title":"Skip $2,000 newspaper fees—modern obituary service","body":"Honor your loved one with a dignified online tribute and real visibility. Start today: {{TARGET_URL}}"},
@@ -55,7 +65,10 @@ SITES = [
     {"id":"adcrazy","new_ad_url":"https://www.adcrazy.co.uk/","category_hints":["Announcements","Community","Services"],"cooldown_days":7},
     {"id":"worldfreeads","new_ad_url":"https://www.worldfreeads.com/","category_hints":["Announcements","Community","Services"],"cooldown_days":7},
 ]
-MAX_PER_RUN = 6
+
+# ---- utils ----
+def sanitize(s: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in s)[:80]
 
 def read_last_by_site():
     m = {}
@@ -71,19 +84,12 @@ def read_last_by_site():
                     continue
     return m
 
-def append_log(row: dict):
+def append_log_row(row):
     write_header = not LOG.exists()
     with LOG.open("a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["ts","site","url","title","result","detail"])
+        w = csv.DictWriter(f, fieldnames=["ts","site","url","title","result","detail","shot"])
         if write_header: w.writeheader()
         w.writerow(row)
-
-BUTTON_TEXTS = ["Post","Submit","Publish","Continue","Create","Place Ad","Post Ad","Proceed","Next","Save","Send"]
-TITLE_HINTS = ["title","subject","headline","adtitle","posttitle"]
-BODY_HINTS  = ["body","content","message","description","text","post","story","details"]
-EMAIL_HINTS = ["email","e-mail","contact"]
-NAME_HINTS  = ["name","contactname","fullname"]
-PHONE_HINTS = ["phone","telephone","mobile","contactnumber","contact"]
 
 def fill_by_hints(page, hints, value):
     for h in hints:
@@ -115,8 +121,7 @@ def try_select_category(page, hints):
                 t = (opt.inner_text() or "").strip()
                 if any(h.lower() in t.lower() for h in hints):
                     val = opt.get_attribute("value") or opt.inner_text()
-                    sel.select_option(value=val)
-                    return True
+                    sel.select_option(value=val); return True
     except Exception:
         pass
     return False
@@ -124,104 +129,129 @@ def try_select_category(page, hints):
 def click_submit(page):
     for t in BUTTON_TEXTS:
         btn = page.query_selector(f'button:has-text("{t}")') or page.query_selector(f'input[type="submit"][value*="{t}" i]')
-        if btn: btn.click(); return True
+        if btn:
+            btn.click(); page.wait_for_timeout(1200)
+            try: btn.click()
+            except Exception: pass
+            return True
     btn = page.query_selector("button") or page.query_selector('input[type="submit"]')
-    if btn: btn.click(); return True
-    page.keyboard.press("Enter"); return True
+    if btn: btn.click(); page.wait_for_timeout(1200); return True
+    page.keyboard.press("Enter"); page.wait_for_timeout(1200); return True
 
 def looks_success(page):
-    html = page.content().lower()
-    if any(p in html for p in ["thank you","your ad","posted","success","submitted"]): return True
-    if re.search(r"/(view|ads?|post|detail|success|thanks)/", page.url, re.I): return True
+    html_l = page.content().lower()
+    patterns = ["thank you","your ad","posted","success","submitted","awaiting approval","processing"]
+    if any(p in html_l for p in patterns): return True
+    if re.search(r"/(view|ads?|post|detail|success|thanks|submitted)/", page.url, re.I): return True
     return False
 
-def screenshot(page, site_id, status):
+def take_shot(page, site_id, status):
     ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    fn = SHOTS / f"{ts}-{sanitize(site_id)}-{status}.png"
-    try:
-        page.screenshot(path=str(fn), full_page=True)
-    except Exception:
-        pass
+    fn = f"{ts}-{sanitize(site_id)}-{status}.png"
+    path = SHOTS / fn
+    try: page.screenshot(path=str(path), full_page=True)
+    except Exception: pass
+    return f"shots/{fn}"
 
 def post_one(pw, site, ad):
     site_id = site["id"]; url = site["new_ad_url"]
-    result = {"site":site_id, "url":"", "title":ad["title"], "result":"fail", "detail":""}
+    result = {"site":site_id,"url":"","title":ad["title"],"result":"fail","detail":"","shot":""}
 
     browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
     ctx = browser.new_context()
     page = ctx.new_page()
     try:
         page.goto(url, timeout=60000)
-        time.sleep(random.uniform(1.8,3.8))
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+        page.wait_for_timeout(random.uniform(1200,2000))
+
         try:
             link = page.get_by_text(re.compile(r"(post|publish).{0,6}(ad|now)?", re.I))
-            if link: link.first.click(timeout=2000); time.sleep(random.uniform(1.0,2.0))
+            if link: link.first.click(timeout=2500); page.wait_for_timeout(1000)
         except Exception:
             pass
 
         utm = "?utm_source=classifieds&utm_medium=autoposter&utm_campaign=tribute"
-        body = f"{ad['body'].replace('{{TARGET_URL}}', TARGET_URL)}\nMore: {TARGET_URL}{utm}"
-        title = ad['title'].replace("{{TARGET_URL}}", TARGET_URL)
+        title = ad["title"].replace("{{TARGET_URL}}", TARGET_URL)
+        body  = ad["body"].replace("{{TARGET_URL}}", TARGET_URL) + f"\nMore: {TARGET_URL}{utm}"
 
         guess_and_fill_fields(page, title, body)
         try_select_category(page, site.get("category_hints", []))
         click_submit(page)
 
-        try:
-            page.wait_for_load_state("networkidle", timeout=30000)
-        except PWTimeout:
-            pass
-        time.sleep(random.uniform(1.0,2.0))
+        for _ in range(3):
+            try: page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception: pass
+            page.wait_for_timeout(1200)
+            if looks_success(page): break
 
         if looks_success(page):
-            screenshot(page, site_id, "ok")
-            result.update(result="ok", url=page.url, detail="posted")
+            result.update(result="ok", url=page.url, detail="posted", shot=take_shot(page, site_id, "ok"))
         else:
-            screenshot(page, site_id, "maybe")
-            result.update(detail="no-success-marker")
+            result.update(detail="no-success-marker", shot=take_shot(page, site_id, "maybe"))
     except Exception as e:
-        screenshot(page, site_id, "error")
-        result.update(detail=f"error:{type(e).__name__}:{str(e)[:140]}")
+        result.update(detail=f"error:{type(e).__name__}:{str(e)[:140]}", shot=take_shot(page, site_id, "error"))
     finally:
         ctx.close(); browser.close()
     return result
 
-def main():
-    # cooldown using CSV log
-    last = {}
-    if LOG.exists():
-        with LOG.open("r", newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                try:
-                    ts = datetime.fromisoformat(row["ts"])
-                    site = row.get("site","")
-                    if site and (site not in last or ts > last[site]):
-                        last[site] = ts
-                except Exception:
-                    pass
+def build_report(rows):
+    # write urls.txt
+    with URLS.open("w", encoding="utf-8") as f:
+        for r in rows:
+            if r["result"]=="ok" and r["url"]:
+                f.write(r["url"]+"\n")
 
-    eligible, now = [], datetime.utcnow()
-    for s in SITES:
-        cd = int(s.get("cooldown_days", 7))
-        if s["id"] not in last or (now - last[s["id"]]) >= timedelta(days=cd):
-            eligible.append(s)
+    # write HTML
+    head = """<!doctype html><meta charset="utf-8">
+<title>Autoposter Report</title>
+<style>
+body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:20px}
+h1{margin:0 0 6px 0}
+small{color:#666}
+table{border-collapse:collapse;width:100%;margin-top:12px}
+td,th{border:1px solid #ddd;padding:8px;font-size:14px;vertical-align:top}
+th{background:#f3f3f3;text-align:left}
+.ok{color:#0a7a2a;font-weight:600}
+.fail{color:#a00;font-weight:600}
+code{background:#f5f5f5;padding:2px 4px;border-radius:4px}
+img{max-width:420px;border:1px solid #ddd}
+</style>"""
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    body = [f"<h1>Autoposter Report</h1><small>Generated {ts}</small>",
+            "<table><tr><th>Site</th><th>Result</th><th>Title</th><th>URL</th><th>Screenshot</th><th>Detail</th></tr>"]
+    for r in rows:
+        url_html = f'<a href="{html.escape(r["url"])}" target="_blank">{html.escape(r["url"])}</a>' if r["url"] else ""
+        shot_html = f'<a href="{html.escape(r["shot"])}" target="_blank"><img src="{html.escape(r["shot"])}"></a>' if r["shot"] else ""
+        cls = "ok" if r["result"]=="ok" else "fail"
+        body.append(f"<tr><td>{html.escape(r['site'])}</td><td class='{cls}'>{html.escape(r['result'])}</td>"
+                    f"<td>{html.escape(r['title'])}</td><td>{url_html}</td><td>{shot_html}</td><td><code>{html.escape(r['detail'])}</code></td></tr>")
+    body.append("</table>")
+    REPORT.write_text(head + "\n" + "\n".join(body), encoding="utf-8")
+
+def main():
+    # cooldown by CSV history
+    last = read_last_by_site()
+    now = datetime.utcnow()
+    eligible = [s for s in SITES if s["id"] not in last or (now - last[s["id"]]) >= timedelta(days=int(s.get("cooldown_days",7)))]
     random.shuffle(eligible)
     todo = eligible[:MAX_PER_RUN]
     if not todo:
         print("No sites eligible today."); return
 
+    results = []
     with sync_playwright() as pw:
         for s in todo:
             ad = random.choice(ADS)
             print(f"[{datetime.utcnow().isoformat()}] Posting to {s['id']} ...")
             r = post_one(pw, s, ad)
             print(r)
-            with LOG.open("a", newline="", encoding="utf-8") as f:
-                write_header = f.tell() == 0
-                w = csv.DictWriter(f, fieldnames=["ts","site","url","title","result","detail"])
-                if write_header: w.writeheader()
-                w.writerow({"ts": datetime.utcnow().isoformat(), **r})
+            row = {"ts": datetime.utcnow().isoformat(), **r}
+            append_log_row(row)
+            results.append(r)
             time.sleep(random.uniform(7,15))
+
+    build_report(results)
 
 if __name__ == "__main__":
     main()
