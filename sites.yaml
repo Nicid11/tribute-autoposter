@@ -1,0 +1,34 @@
+defaults:
+  cooldown_days: 7
+  max_per_run: 5
+  success_text:
+    - "Thank you"
+    - "Your ad"
+    - "posted"
+    - "success"
+sites:
+  - id: posteezy
+    new_ad_url: "https://posteezy.com/"
+    notes: "No-login posting allowed."
+    category_hints: ["Announcements","Community","Obituary","Services"]
+    require_login: false
+  - id: usnetads
+    new_ad_url: "https://www.usnetads.com/post/post-free-ads.php"
+    notes: "States no sign-up required."
+    category_hints: ["Announcements","Community","Services"]
+    require_login: false
+  - id: adpost4u
+    new_ad_url: "https://www.adpost4u.com/"
+    notes: "Allows posting without registration."
+    category_hints: ["Services","Community","Announcements"]
+    require_login: false
+  - id: globalfreeads
+    new_ad_url: "https://www.global-free-classified-ads.com/"
+    notes: "Guest posting supported."
+    category_hints: ["Announcements","Services"]
+    require_login: false
+  - id: adpost
+    new_ad_url: "https://www.adpost.com/post-ad/"
+    notes: "Free postings; premium options exist."
+    category_hints: ["Community","Services"]
+    require_login: false
